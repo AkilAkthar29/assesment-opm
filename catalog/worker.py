@@ -137,8 +137,8 @@ def send_webhook(url, event, data, job_id):
     target = addresses[0][4]
     cls = http.client.HTTPSConnection if parts.scheme == "https" else http.client.HTTPConnection
     connection = cls(host, port, timeout=8)
-    connection._create_connection = lambda _address, timeout, **_: socket.create_connection(
-        (target[0], target[1]), timeout
+    connection._create_connection = lambda _address, timeout=8, source_address=None, **_: socket.create_connection(
+        (target[0], target[1]), timeout, source_address
     )
     path = parts.path or "/"
     if parts.query:
@@ -188,16 +188,19 @@ def process(job):
             started = time.monotonic()
             def timeout_handler(*_):
                 raise TimeoutError("Webhook exceeded the 15-second deadline.")
-            previous = signal.signal(signal.SIGALRM, timeout_handler)
-            signal.alarm(15)
+            # Compose runs Linux prefork workers. Windows direct test runs have no SIGALRM.
+            previous = signal.signal(signal.SIGALRM, timeout_handler) if hasattr(signal, 'SIGALRM') else None
+            if previous is not None:
+                signal.alarm(15)
             try:
                 result = send_webhook(payload["url"], payload["event"], payload["data"], job_id)
             except (Invalid, OSError, ValueError, http.client.HTTPException) as error:
                 result = {"status_code": None, "response_ms": round((time.monotonic()-started)*1000),
                           "ok": False, "error": str(error)[:500]}
             finally:
-                signal.alarm(0)
-                signal.signal(signal.SIGALRM, previous)
+                if previous is not None:
+                    signal.alarm(0)
+                    signal.signal(signal.SIGALRM, previous)
             with connect() as db:
                 finish(db, job_id, result)
     except (Invalid, UnicodeError, csv.Error, OSError, http.client.HTTPException) as error:

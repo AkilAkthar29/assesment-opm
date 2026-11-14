@@ -1,6 +1,7 @@
 import json
 import time
 import uuid
+import ipaddress
 from urllib.parse import urlsplit
 
 EVENTS = ("product.created", "product.updated", "product.deleted",
@@ -44,6 +45,17 @@ def webhook(data):
         raise Invalid("Enter a valid webhook URL.") from error
     if not valid:
         raise Invalid("Use an HTTP or HTTPS URL without credentials or a fragment.")
+    if (parts.port or (443 if parts.scheme == 'https' else 80)) not in (80, 443):
+        raise Invalid("Webhook delivery supports ports 80 and 443.")
+    host = parts.hostname.rstrip('.').lower()
+    if host == 'localhost' or host.endswith('.localhost'):
+        raise Invalid("Webhook destination must be public.")
+    try:
+        address = ipaddress.ip_address(host)
+    except ValueError:
+        address = None
+    if address is not None and (not address.is_global or address.is_multicast):
+        raise Invalid("Webhook destination must be public.")
     events = data.get("events")
     if not isinstance(events, list) or not events or any(event not in EVENTS for event in events):
         raise Invalid("Select at least one supported event.")
