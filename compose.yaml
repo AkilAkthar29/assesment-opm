@@ -32,17 +32,30 @@ services:
       retries: 20
   redis:
     image: redis:7
+  init:
+    <<: *backend
+    command: python -c "from catalog.db import initialize; initialize()"
   api:
     <<: *backend
+    depends_on: &initialized
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_started
+      init:
+        condition: service_completed_successfully
     command: sh -c "python -c 'from catalog.db import initialize; initialize()' && gunicorn config.wsgi --bind 0.0.0.0:8000 --workers 2 --threads 4 --timeout 180"
   catalog-worker:
     <<: *backend
+    depends_on: *initialized
     command: celery -A config.celery worker -Q catalog -c 1 -n catalog@%h
   webhook-worker:
     <<: *backend
+    depends_on: *initialized
     command: celery -A config.celery worker -Q webhooks -c 1 -n webhooks@%h
   scheduler:
     <<: *backend
+    depends_on: *initialized
     command: celery -A config.celery beat --schedule /tmp/product-ops-beat
   frontend:
     build: frontend

@@ -11,6 +11,7 @@ WSGI_APPLICATION = "config.wsgi.application"
 INSTALLED_APPS = []
 MIDDLEWARE = ["django.middleware.security.SecurityMiddleware"]
 FILE_UPLOAD_MAX_MEMORY_SIZE = 0
+FILE_UPLOAD_TEMP_DIR = os.path.join(os.getenv('DATA_DIR', 'data'), 'uploads')
 DATA_UPLOAD_MAX_MEMORY_SIZE = 100_000
 CELERY_BROKER_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
 CELERY_TASK_IGNORE_RESULT = True
