@@ -1,32 +1,99 @@
-# Verification — native Windows/WSL layout
+# Verification - 14 November 2026
 
-Results below apply to the reorganized `backend/` and `frontend/` sources. Prior infrastructure-specific measurements are not used as evidence for the new startup flow.
+These results supersede the earlier Windows-only child-process benchmarks.
+No Docker was used. Django and Next.js ran as separate Windows processes;
+Redis, both Celery queues, and beat ran in WSL Ubuntu.
 
-## Checks
+## Environment and data protection
 
-- Fresh PostgreSQL application/test databases: `backend/manage.py migrate` applied `catalog.0001_initial`; Django system check passed.
-- **14 PostgreSQL tests passed**, covering duplicate last-row replacement/status preservation, rollback, CRUD/all filters, cursor pagination/literal wildcard filtering, confirmation, queue exclusion, same-drain recovery, authentication, transactional import events, webhook lifecycle/results/failure timing, private destinations and redirects. Runtime: 7.818 seconds. `makemigrations --check --dry-run` reported no changes; Python compilation passed.
-- Next.js production build and TypeScript passed with the streaming `/api/[...path]` route. Frontend HTTP GET returned 200.
-- Actual source CSV headers re-inspected: **`name,sku,description`**. File size: **90,569,310 bytes**, 500,000 rows. It was downloaded from the supplied assessment link during the earlier session and reused here.
+- Existing Windows Python: `backend/.venv-win`, Python 3.13.17.
+- WSL Ubuntu: Python 3.14.4, Celery 5.7.0, prefork concurrency 1 per queue.
+- Existing Windows PostgreSQL 17.11 on port 5432; demo role `opm_demo`.
+- Disposable demo database `opm_demo_20261114`; independent regression database
+  `opm_submission_test`. Separate `data-demo` / `data-submission-test` directories.
+- Windows `.env.demo` and WSL use the same database credentials and relative
+  storage. WSL DATABASE_HOST resolves to the private Windows gateway. A marker
+  written by Windows was read successfully from `/mnt/d/.../backend/data-demo`.
+- The working `catalog` database contained **466,693 products**. An ordered content
+  fingerprint covering ID, SKU, normalized SKU, name, description, and active status
+  matched before and after destructive demo tests. The working catalog was preserved.
+- Environment files, credentials, raw output, and the 90 MB assessment CSV remain
+  ignored. Small interview CSV fixtures are committed under `demo/`.
 
-## Live flows and benchmarks
+## Automated and live results
 
-The Django development server and a production Next.js server ran separately on Windows. Live HTTP checks used `http://127.0.0.1:3000/api/`, exercising the new streaming route and real PostgreSQL state: product create/edit/delete, duplicate rejection, all filters, clear-confirmation rejection, cross-site write rejection, duplicate CSV replacement/inactive preservation, malformed-file rollback, webhook create/edit/toggle/test/delete, and job results. Jobs were executed directly by the verification process because Linux/Redis transport is unavailable. A real synthetic HTTPS webhook test returned **204 in 1,318 ms**.
+| Check | Result | Evidence / limit |
+| --- | --- | --- |
+| Windows regression suite | PASS | 15 tests, 5.854 seconds, disposable PostgreSQL |
+| Django system checks | PASS | No issues |
+| Migration drift | PASS | No changes detected |
+| Next.js production build / TypeScript | PASS | Next.js 16.4.6 production build completed |
+| Frontend API proxy | PASS | Live requests through `http://127.0.0.1:3002/api/` |
+| Redis and separate Celery queues | PASS | `catalog@KADHARNIYAZ` and `webhooks@KADHARNIYAZ`, Redis DB 4; beat publishes both drains |
+| Shared Windows/WSL storage | PASS | Windows-written marker read from WSL; actual uploaded files processed by Linux workers |
+| Case-only duplicate import | PASS via API | Three rows; last row wins; inactive product stays inactive |
+| Invalid CSV and retry | PASS via API | Line 3 SKU error, unchanged product rows, corrected file completes |
+| Product CRUD, filters, pagination | PASS via API | Create/edit/read/delete, SKU/name/description/status filters, disjoint cursor pages |
+| Import/delete serialization | PASS | Regression tests prove concurrent drains cannot interleave; interrupted job recovered in same drain |
+| Webhook controls and failure reporting | PASS via API | Create/edit/test/disable/delete; subscribed product event queued and consumed; disabled hook creates no delivery |
+| Delete-all confirmation / completion | PASS via API | Missing/false confirmation rejected, no clear job created; true confirmation completed by Celery; empty catalog verified |
+| Browser upload progress and dialogs | NOT VERIFIED | Browser connector host unavailable; native Brave control repeatedly reported minimized window/user input and failed geometry |
+| Browser CRUD refresh/cancel/pagination | NOT VERIFIED | API persistence and cancellation guards passed; interactive clicks were not completed |
+| Successful public webhook receipt | NOT VERIFIED | User supplied no controlled endpoint and requested this limitation be recorded |
+| Public deployment | NOT VERIFIED | No authenticated hosting configured |
 
-Both benchmark runs started with an empty disposable catalog and no enabled webhooks. They streamed the entire multipart file through Next.js to Django/shared storage, then ran actual worker import code in a child process while polling the product API through Next.js. Import time excludes upload and child startup. Peak memory is the Windows child process peak working set; it excludes PostgreSQL, Next.js, Redis, and Celery parent/process overhead.
+The webhook endpoint `https://opm-demo.invalid/edited` intentionally fails DNS.
+The Test job completed with `ok:false`, `status_code:null`, `response_ms:47`, and
+`[Errno -2] Name or service not known`. A subscribed `product.created` delivery
+was also consumed by the webhook worker and reported failure in 16 ms. This
+proves queue routing/failure reporting, not successful external delivery.
+Regression tests mock a 204 response to check result handling; that is not a live
+HTTP success. A controlled receiver is still required to verify actual status
+and subscribed-event receipt end to end.
 
-| Input | Rows | Upload seconds | Import seconds | Peak worker MiB | Concurrent API requests | Maximum API latency | HTTP failures |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| Supplied CSV, 90,569,310 bytes | 500,000 | 0.767 | 54.034 | 39.03 | 150 | 321.36 ms | 0 |
-| Generated fixture, 29,666,692 bytes | 500,000 | 0.272 | 27.979 | 37.82 | 88 | 180.04 ms | 0 |
+The confirmed clear job `fb340af957224d60b41103cbd70bb604` deleted 466,751 demo
+products and reached Complete in 1.096 seconds of observed polling. The working
+catalog's fingerprint remained unchanged. Browser cancellation remains unverified.
 
-These are single-machine/single-run measurements without webhook fan-out, not capacity guarantees. Successful API polling demonstrates availability during imports, not proof of interactive browser responsiveness. Raw results/fixtures remain in ignored `.local/`.
+## Supplied assessment CSV through real Celery
 
-## Outstanding access/dependencies
+Reused local `.local/assessment.csv`; headers `name,sku,description`.
+The live verifier streamed multipart HTTP through the running Next.js proxy to
+Django, then only polled jobs/products. It did not call claim/process/drain locally.
 
-- `wsl --list --verbose` reports **Windows Subsystem for Linux is not installed**. Ubuntu installation and first-launch user setup are needed for the documented PostgreSQL/Redis services and Linux Celery workers/beat. No Windows features were modified automatically.
-- Verification uses portable Python 3.13.9 and PostgreSQL 17.11 under ignored `.local/`, with PostgreSQL on loopback port 55432. This establishes database/application behavior but does not prove Windows-to-WSL forwarding or shared-mount access.
-- Actual Redis → Linux Celery transport, Linux delivery deadline signals, and cross-OS file access remain pending WSL setup. README gives each service/terminal command.
-- `check_services` successfully verified PostgreSQL/migrations/writable storage and correctly reported Redis unavailable. Windows Python is not on PATH; verification used the portable runtime. Install Windows Python for the documented `py`/virtual-environment setup.
-- Browser automation still reports **the browser access host is unavailable**. Interactive upload progress, confirmation dialogs, and visual/mobile responsiveness require manual browser testing or restored browser access. Backend/API behavior and the real large-file HTTP upload route were verified.
-- No repository remote or authenticated compatible hosting is configured, so push/deployment URLs are unavailable. Public configuration requires API authentication and a unique secret.
+| Measurement | Result |
+| --- | ---: |
+| Source size | 90,569,310 bytes |
+| Processed source rows | 500,000 |
+| Upload time | 0.916 seconds |
+| Total upload-to-observed-completion | 56.200 seconds |
+| After-upload completion wait | 55.284 seconds |
+| Celery task duration | 55.120 seconds |
+| Concurrent filtered API requests | 130 |
+| Maximum filtered API latency | 272.08 ms |
+| HTTP failures / job errors | 0 / none |
+
+Job: `8187d44b779247a79f8fc9be0168a03d`.
+Celery task: `0a2c4239-e4e3-475c-9530-5189f1cae1ce`.
+Worker logs show Processing and Finished for that exact job in the catalog
+prefork worker, followed by task success in 55.119666 seconds. Observed stages:
+Queued, Validating data, Writing products, Complete; result `{"rows":500000}`.
+The source contains duplicate SKUs, so source-row count is not unique-product count.
+
+This was a single run, without enabled webhook fan-out. Timings include the
+actual Redis/Celery path and Windows/WSL shared-file access. No peak memory was
+measured in this run. Filtered HTTP success establishes API availability, not
+interactive browser responsiveness. The demo database retains the final imported
+assessment catalog for interview browsing.
+
+## Reproduction and submission
+
+Use the five terminal commands and five-minute walkthrough in README.md.
+`backend/scripts/verify_live.py` is the live Celery verifier; the older
+`backend/scripts/benchmark.py` bypasses Celery and must not be used to claim a
+Redis/Celery pass. The regression suite intentionally invokes worker functions
+in-process for deterministic locking/rollback tests; the live run above provides
+the separate transport evidence.
+
+GitHub publication and repository URL are pending selection of an authenticated
+GitHub account/repository. No public application URL has been verified.
