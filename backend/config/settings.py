@@ -28,8 +28,9 @@ MIDDLEWARE = ["django.middleware.security.SecurityMiddleware"]
 FILE_UPLOAD_MAX_MEMORY_SIZE = 0
 FILE_UPLOAD_TEMP_DIR = str(DATA_DIR / 'uploads')
 DATA_UPLOAD_MAX_MEMORY_SIZE = 100_000
-CELERY_BROKER_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
+CELERY_BROKER_URL = os.getenv('REDIS_URL', 'redis://127.0.0.1:6379/0')
 CELERY_TASK_IGNORE_RESULT = True
+CELERY_TASK_ROUTES = {'catalog.drain': {'queue': 'catalog'}}
 CELERY_WORKER_PREFETCH_MULTIPLIER = 1
 CELERY_BROKER_CONNECTION_RETRY_ON_STARTUP = True
-
+CELERY_BROKER_TRANSPORT_OPTIONS = {'visibility_timeout': 86400}

@@ -1,0 +1,4 @@
+name,sku,description
+First version,DEMO-001,This row will be replaced
+Last version,demo-001,Case insensitive duplicate - last row wins
+Desk lamp,DEMO-002,Interview demo product

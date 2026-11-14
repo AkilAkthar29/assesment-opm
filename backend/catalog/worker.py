@@ -178,7 +178,7 @@ def process(job):
             started = time.monotonic()
             def timeout_handler(*_):
                 raise TimeoutError("Webhook exceeded the 15-second deadline.")
-            # WSL runs Linux prefork workers. Windows direct test runs have no SIGALRM.
+            # Platforms with SIGALRM also enforce an overall request deadline.
             previous = signal.signal(signal.SIGALRM, timeout_handler) if hasattr(signal, 'SIGALRM') else None
             if previous is not None:
                 signal.alarm(15)

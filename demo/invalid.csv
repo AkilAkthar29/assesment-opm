@@ -1,0 +1,3 @@
+name,sku,description
+Should not be saved,DEMO-003,Validation must finish before any changes
+Missing SKU,,This should fail with a line number

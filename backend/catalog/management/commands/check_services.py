@@ -1,13 +1,13 @@
-from django.conf import settings
 from django.core.management.base import BaseCommand, CommandError
 from django.db import connection
 from django.db.migrations.executor import MigrationExecutor
-from redis import Redis
 from config.env import DATA_DIR
+from django.conf import settings
+from redis import Redis
 
 
 class Command(BaseCommand):
-    help = 'Check PostgreSQL, migrations, shared storage and Redis without printing credentials.'
+    help = 'Check PostgreSQL, migrations, storage and Redis without printing credentials.'
 
     def handle(self, *args, **options):
         try:
@@ -19,7 +19,7 @@ class Command(BaseCommand):
         except CommandError:
             raise
         except Exception as error:
-            raise CommandError('PostgreSQL is unavailable. Start it in WSL and check DATABASE_URL and Windows localhost forwarding.') from error
+            raise CommandError('PostgreSQL is unavailable. Start the Windows PostgreSQL service and check DATABASE_URL.') from error
         self.stdout.write('PostgreSQL and migrations: OK')
         probe = DATA_DIR / '.storage-probe'
         try:
@@ -29,8 +29,8 @@ class Command(BaseCommand):
             raise CommandError('Shared DATA_DIR is not writable.') from error
         self.stdout.write(f'Shared storage: {DATA_DIR}')
         try:
-            with Redis.from_url(settings.CELERY_BROKER_URL, socket_connect_timeout=3, socket_timeout=3) as redis:
-                redis.ping()
+            with Redis.from_url(settings.CELERY_BROKER_URL, socket_connect_timeout=3, socket_timeout=3) as broker:
+                broker.ping()
         except Exception as error:
-            raise CommandError('Redis is unavailable. In WSL run: sudo service redis-server start. Then check REDIS_URL.') from error
-        self.stdout.write('Redis: OK')
+            raise CommandError('Redis is unavailable. Start Redis in WSL Ubuntu and check REDIS_URL.') from error
+        self.stdout.write('Redis: OK (use celery inspect ping to check workers separately)')
