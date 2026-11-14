@@ -10,14 +10,9 @@ import time
 from urllib.parse import urlsplit
 
 from .core import Invalid, emit, product
-from .db import DATA, DATABASE_URL, connect, initialize
+from .db import DATA, connect
 
 MAX_ROWS = 500_000
-UPSERT = """
-INSERT INTO products (sku, sku_key, name, description, active) VALUES (?, ?, ?, ?, ?)
-ON CONFLICT (sku_key) DO UPDATE SET
-sku = excluded.sku, name = excluded.name, description = excluded.description
-"""
 ALIASES = {"sku": ("sku", "productsku", "stockkeepingunit"),
            "name": ("name", "productname", "title"),
            "description": ("description", "productdescription", "desc")}
@@ -84,38 +79,35 @@ def import_csv(job_id, payload):
             progress(job_id, "Writing products", 85, count)
             staged.seek(0)
             with connect() as db:
-                if DATABASE_URL:
-                    db.execute("CREATE TEMP TABLE stage_products (seq BIGINT GENERATED ALWAYS AS IDENTITY, sku TEXT, sku_key TEXT, name TEXT, description TEXT, active INTEGER) ON COMMIT DROP")
-                    with db.raw.cursor() as cursor:
-                        with cursor.copy("COPY stage_products (sku, sku_key, name, description, active) FROM STDIN") as copy:
-                            for line in staged:
-                                copy.write_row(json.loads(line))
-                    db.execute("""CREATE TEMP TABLE final_products ON COMMIT DROP AS
-                        SELECT DISTINCT ON (s.sku_key) s.*, p.id IS NOT NULL AS existed
-                        FROM stage_products s LEFT JOIN products p ON p.sku_key=s.sku_key
-                        ORDER BY s.sku_key, s.seq DESC""")
-                    db.execute("""
-                        INSERT INTO products (sku, sku_key, name, description, active)
-                        SELECT sku, sku_key, name, description, active
-                        FROM final_products
-                        ON CONFLICT (sku_key) DO UPDATE SET sku=excluded.sku,
-                            name=excluded.name, description=excluded.description
-                    """)
-                    # Transactional outbox: one delivery per subscribed product event.
-                    db.execute("""INSERT INTO jobs(id,kind,state,stage,payload,created_at)
-                        SELECT md5(random()::text || p.id::text || h.id::text),
-                          'delivery','queued','Queued',
-                          jsonb_build_object('url',h.url,'event',
-                            CASE WHEN f.existed THEN 'product.updated' ELSE 'product.created' END,
-                            'data',jsonb_build_object('id',p.id,'sku',p.sku,'name',p.name,
-                              'description',p.description,'active',p.active=1))::text,
-                          (extract(epoch FROM clock_timestamp()) * 1000000000)::bigint
-                        FROM final_products f JOIN products p ON p.sku_key=f.sku_key
-                        CROSS JOIN webhooks h WHERE h.enabled=1 AND jsonb_exists(h.events::jsonb,
-                          CASE WHEN f.existed THEN 'product.updated' ELSE 'product.created' END)
-                    """)
-                else:
-                    db.many(UPSERT, (json.loads(line) for line in staged))
+                db.execute("CREATE TEMP TABLE stage_products (seq BIGINT GENERATED ALWAYS AS IDENTITY, sku TEXT, sku_key TEXT, name TEXT, description TEXT, active INTEGER) ON COMMIT DROP")
+                with db.raw.cursor() as cursor:
+                    with cursor.copy("COPY stage_products (sku, sku_key, name, description, active) FROM STDIN") as copy:
+                        for line in staged:
+                            copy.write_row(json.loads(line))
+                db.execute("""CREATE TEMP TABLE final_products ON COMMIT DROP AS
+                    SELECT DISTINCT ON (s.sku_key) s.*, p.id IS NOT NULL AS existed
+                    FROM stage_products s LEFT JOIN products p ON p.sku_key=s.sku_key
+                    ORDER BY s.sku_key, s.seq DESC""")
+                db.execute("""
+                    INSERT INTO products (sku, sku_key, name, description, active)
+                    SELECT sku, sku_key, name, description, active
+                    FROM final_products
+                    ON CONFLICT (sku_key) DO UPDATE SET sku=excluded.sku,
+                        name=excluded.name, description=excluded.description
+                """)
+                # Transactional outbox: one delivery per subscribed product event.
+                db.execute("""INSERT INTO jobs(id,kind,state,stage,payload,created_at)
+                    SELECT md5(random()::text || p.id::text || h.id::text),
+                      'delivery','queued','Queued',
+                      jsonb_build_object('url',h.url,'event',
+                        CASE WHEN f.existed THEN 'product.updated' ELSE 'product.created' END,
+                        'data',jsonb_build_object('id',p.id,'sku',p.sku,'name',p.name,
+                          'description',p.description,'active',p.active=1))::text,
+                      (extract(epoch FROM clock_timestamp()) * 1000000000)::bigint
+                    FROM final_products f JOIN products p ON p.sku_key=f.sku_key
+                    CROSS JOIN webhooks h WHERE h.enabled=1 AND jsonb_exists(h.events::jsonb,
+                      CASE WHEN f.existed THEN 'product.updated' ELSE 'product.created' END)
+                """)
                 result = {"rows": count}
                 emit(db, "import.completed", result)
                 finish(db, job_id, result)
@@ -156,10 +148,8 @@ def send_webhook(url, event, data, job_id):
 
 def claim(kinds):
     placeholders = ",".join("?" for _ in kinds)
-    locking = " FOR UPDATE SKIP LOCKED" if DATABASE_URL else ""
+    locking = " FOR UPDATE SKIP LOCKED"
     with connect() as db:
-        if not DATABASE_URL:
-            db.execute("BEGIN IMMEDIATE")
         row = db.execute(f"SELECT id, kind, payload FROM jobs WHERE state='queued' AND kind IN ({placeholders}) ORDER BY created_at LIMIT 1{locking}", kinds).fetchone()
         if row:
             db.execute("UPDATE jobs SET state='running', stage='Starting' WHERE id=?", (row["id"],))
@@ -188,7 +178,7 @@ def process(job):
             started = time.monotonic()
             def timeout_handler(*_):
                 raise TimeoutError("Webhook exceeded the 15-second deadline.")
-            # Compose runs Linux prefork workers. Windows direct test runs have no SIGALRM.
+            # WSL runs Linux prefork workers. Windows direct test runs have no SIGALRM.
             previous = signal.signal(signal.SIGALRM, timeout_handler) if hasattr(signal, 'SIGALRM') else None
             if previous is not None:
                 signal.alarm(15)
@@ -211,28 +201,4 @@ def process(job):
     finally:
         if kind == "import":
             (DATA / "uploads" / (job_id + ".csv")).unlink(missing_ok=True)
-
-
-def run(kinds):
-    initialize()
-    with connect() as db:
-        placeholders = ",".join("?" for _ in kinds)
-        interrupted = db.execute(f"""
-            UPDATE jobs SET state='failed', stage='Failed', error='Worker restarted. Please try again.'
-            WHERE state='running' AND kind IN ({placeholders}) RETURNING id, kind
-        """, kinds).fetchall()
-    for job in interrupted:
-        if job["kind"] == "import":
-            (DATA / "uploads" / (job["id"] + ".csv")).unlink(missing_ok=True)
-    while True:
-        job = claim(kinds)
-        if job:
-            process(job)
-        else:
-            time.sleep(.5)
-
-
-if __name__ == "__main__":
-    import sys
-    run(("delivery", "test") if sys.argv[1:] == ["webhooks"] else ("import", "clear"))
 

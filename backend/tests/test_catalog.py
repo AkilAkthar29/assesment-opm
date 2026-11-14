@@ -1,4 +1,4 @@
-"""Run in the API container against a separate PostgreSQL test database."""
+"""Run against a separate PostgreSQL test database; never the working catalog."""
 import base64
 import csv
 import json
@@ -84,6 +84,17 @@ class CatalogTests(unittest.TestCase):
         self.assertEqual(j['state'],'failed')
         self.assertEqual(self.client.get('/api/products/').json()['items'][0]['name'],'Original')
 
+    def test_pagination_and_literal_filter(self):
+        with connect() as db:
+            db.many('INSERT INTO products(sku,sku_key,name,description,active) VALUES(?,?,?,?,?)',
+                    (product({'sku':f'page-{i}','name':'Literal %_ name'}) for i in range(53)))
+        first=self.client.get('/api/products/').json()
+        second=self.client.get('/api/products/?after='+str(first['next'])).json()
+        self.assertEqual(len(first['items']),50); self.assertEqual(len(second['items']),3)
+        self.assertIsNone(second['next'])
+        self.assertFalse({x['id'] for x in first['items']} & {x['id'] for x in second['items']})
+        self.assertEqual(len(self.client.get('/api/products/?name=%25_').json()['items']),50)
+
     def test_crud_filters_confirmation(self):
         r=self.request('products/',{'sku':'SKU-A','name':'Chair','description':'Oak','active':False})
         self.assertEqual(r.status_code,201); pk=r.json()['id']
@@ -143,6 +154,15 @@ class CatalogTests(unittest.TestCase):
             finally:
                 release.set();thread.join(10)
         self.assertFalse(thread.is_alive());self.assertEqual(failures,[])
+
+    def test_interrupted_job_is_recovered_in_same_drain(self):
+        from config.celery import drain
+        response=self.request('clear/',{'confirm':True})
+        job_id=response.json()['id']
+        with connect() as db:
+            db.execute("UPDATE jobs SET state='running' WHERE id=?",(job_id,))
+        drain.run('catalog')
+        self.assertEqual(self.client.get('/api/jobs/'+job_id+'/').json()['state'],'complete')
 
     def test_import_product_events_are_transactional(self):
         self.request('webhooks/',{'url':'https://example.org','events':['product.created','product.updated','import.completed']})

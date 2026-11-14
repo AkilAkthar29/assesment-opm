@@ -3,11 +3,14 @@ __pycache__/
 .env
 .venv/
 data/
+/backend/data*/
 .local/
 *.csv
 node_modules/
 .next/
 *.tsbuildinfo
+celerybeat-schedule*
+*.log
 .env.*
 !.env.example
 
