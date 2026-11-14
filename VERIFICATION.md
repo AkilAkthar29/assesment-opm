@@ -1,41 +1,32 @@
-# Verification — 14 November 2026
+# Verification — native Windows/WSL layout
 
-## Environment and checks
+Results below apply to the reorganized `backend/` and `frontend/` sources. Prior infrastructure-specific measurements are not used as evidence for the new startup flow.
 
-Windows, portable Python 3.13.9, PostgreSQL 17.11 binaries on loopback port 55432, Django 5.2.19, Celery 5.7.0, psycopg 3.3.9; Node 22 and Next.js 16.4.6. Downloaded tools, databases, source CSVs, generated fixtures, and raw measurement output live under ignored `.local/`.
+## Checks
 
-- **12 tests passed** against a separate disposable PostgreSQL database, including real COPY and bulk upsert. Coverage: case-insensitive replacement/last-row-wins, inactive preservation/new-active default, malformed CSV rollback, CRUD and all four filters, server-side delete-all confirmation, simultaneous drain exclusion, auth, import event outbox, webhook CRUD/test results, transport failure timing, private destinations, and redirect refusal.
-- Django system check: no issues. Python compilation: passed.
-- Next.js production compilation and TypeScript: passed. Local frontend HTTP GET: 200.
-- Both Compose configurations passed the official standalone Docker Compose v2.40.3 `config --quiet` validation.
-- A real HTTPS webhook POST of synthetic empty test data to `https://httpbin.org/status/204` returned **204 in 816 ms**. Public address resolution, pinned connection, and TLS hostname verification were exercised. Mocked tests separately verified rejection and failure paths.
+- Fresh PostgreSQL application/test databases: `backend/manage.py migrate` applied `catalog.0001_initial`; Django system check passed.
+- **14 PostgreSQL tests passed**, covering duplicate last-row replacement/status preservation, rollback, CRUD/all filters, cursor pagination/literal wildcard filtering, confirmation, queue exclusion, same-drain recovery, authentication, transactional import events, webhook lifecycle/results/failure timing, private destinations and redirects. Runtime: 7.818 seconds. `makemigrations --check --dry-run` reported no changes; Python compilation passed.
+- Next.js production build and TypeScript passed with the streaming `/api/[...path]` route. Frontend HTTP GET returned 200.
+- Actual source CSV headers re-inspected: **`name,sku,description`**. File size: **90,569,310 bytes**, 500,000 rows. It was downloaded from the supplied assessment link during the earlier session and reused here.
 
-## Import measurements
+## Live flows and benchmarks
 
-Both final runs started with an empty catalog and no enabled webhooks. Each executed the actual `catalog.worker.process` import code in an isolated child Python process, using the same PostgreSQL database as the concurrently polled Django HTTP API. Time excludes upload, fixture creation, and child startup. Peak memory is Windows peak working set for that process; it excludes PostgreSQL, Redis, and Celery parent/process overhead.
+The Django development server and a production Next.js server ran separately on Windows. Live HTTP checks used `http://127.0.0.1:3000/api/`, exercising the new streaming route and real PostgreSQL state: product create/edit/delete, duplicate rejection, all filters, clear-confirmation rejection, cross-site write rejection, duplicate CSV replacement/inactive preservation, malformed-file rollback, webhook create/edit/toggle/test/delete, and job results. Jobs were executed directly by the verification process because Linux/Redis transport is unavailable. A real synthetic HTTPS webhook test returned **204 in 1,318 ms**.
 
-| File | Input rows | Import seconds | Peak worker MiB | HTTP samples during import | Maximum list API latency | HTTP errors |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| Supplied assessment CSV | 500,000 | 37.828 | 39.26 | 109 | 235.44 ms | 0 |
-| Generated fixture | 500,000 | 34.687 | 37.91 | 103 | 330.06 ms | 0 |
+Both benchmark runs started with an empty disposable catalog and no enabled webhooks. They streamed the entire multipart file through Next.js to Django/shared storage, then ran actual worker import code in a child process while polling the product API through Next.js. Import time excludes upload and child startup. Peak memory is the Windows child process peak working set; it excludes PostgreSQL, Next.js, Redis, and Celery parent/process overhead.
 
-The supplied file's exact headers are `name,sku,description`; size is 90,569,310 bytes. It produced **466,693 unique products**, confirming that duplicate input SKUs were consolidated. The generated fixture uses unique `fixture-{i}` SKUs, names, and descriptions. Measurements are single runs on this machine, without subscribed product-event delivery load; they are not capacity guarantees.
+| Input | Rows | Upload seconds | Import seconds | Peak worker MiB | Concurrent API requests | Maximum API latency | HTTP failures |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| Supplied CSV, 90,569,310 bytes | 500,000 | 0.767 | 54.034 | 39.03 | 150 | 321.36 ms | 0 |
+| Generated fixture, 29,666,692 bytes | 500,000 | 0.272 | 27.979 | 37.82 | 88 | 180.04 ms | 0 |
 
-The API remained available during both imports. The Next.js page served successfully, but browser interaction and visual/mobile responsiveness could not be verified: the browser access host was unavailable, and the native fallback stopped because the current browser URL could not be established safely. API availability alone does not prove interactive UI responsiveness.
+These are single-machine/single-run measurements without webhook fan-out, not capacity guarantees. Successful API polling demonstrates availability during imports, not proof of interactive browser responsiveness. Raw results/fixtures remain in ignored `.local/`.
 
-## Outstanding verification and access
+## Outstanding access/dependencies
 
-- **Full `docker compose up --build`, Celery/Redis transport, Linux 15-second signal deadline, and nginx upload streaming:** configuration validated, but no Docker engine/Desktop is installed in this environment. Run the documented commands on Docker Desktop with WSL 2/Linux containers. PostgreSQL/API/job behavior was tested directly; that is not a substitute for the full container startup check.
-- **Browser upload progress, retry interaction, confirmation dialogs, and responsive rendering:** implemented and build-checked; require working browser automation or manual testing at `http://localhost:3000`. Backend upload, validation, job, CRUD, and clear APIs were tested.
-- **Push:** the supplied folder had no Git repository or remote. Local commits were created. An authenticated repository URL/remote is required for push; none is configured.
-- **Public deployment:** requires authenticated access to a Docker-capable host with persistent PostgreSQL/shared upload storage, Redis, Celery processes, a public domain, and TLS. Available static/Worker hosting cannot run this stack. No public endpoint was created. The public-deployment configuration guard requires API authentication and a unique application secret.
-
-## Manual end-to-end checklist on Docker Desktop
-
-1. Run `docker compose up --build`; open `http://localhost:3000`.
-2. Import the supplied CSV. Observe browser byte progress, then parsing/validation/writing/completion in Activity. Search products while it runs.
-3. Edit a product inactive and import its SKU in different casing with two rows. The last row should win and the product should stay inactive.
-4. Upload a file with a valid first row and malformed later row. Confirm failure and unchanged catalog; select a corrected file and retry.
-5. Exercise all filters, Next/Previous, create/edit/delete, and cancel an individual deletion.
-6. Cancel delete-all, then type `DELETE ALL`; observe queued/progress/result. Queue it behind an import to verify serialized behavior.
-7. Add a public webhook, select events, edit and toggle it, and run Test. Inspect status/time/error; test a redirect endpoint and private destination rejection. Delete the webhook.
+- `wsl --list --verbose` reports **Windows Subsystem for Linux is not installed**. Ubuntu installation and first-launch user setup are needed for the documented PostgreSQL/Redis services and Linux Celery workers/beat. No Windows features were modified automatically.
+- Verification uses portable Python 3.13.9 and PostgreSQL 17.11 under ignored `.local/`, with PostgreSQL on loopback port 55432. This establishes database/application behavior but does not prove Windows-to-WSL forwarding or shared-mount access.
+- Actual Redis → Linux Celery transport, Linux delivery deadline signals, and cross-OS file access remain pending WSL setup. README gives each service/terminal command.
+- `check_services` successfully verified PostgreSQL/migrations/writable storage and correctly reported Redis unavailable. Windows Python is not on PATH; verification used the portable runtime. Install Windows Python for the documented `py`/virtual-environment setup.
+- Browser automation still reports **the browser access host is unavailable**. Interactive upload progress, confirmation dialogs, and visual/mobile responsiveness require manual browser testing or restored browser access. Backend/API behavior and the real large-file HTTP upload route were verified.
+- No repository remote or authenticated compatible hosting is configured, so push/deployment URLs are unavailable. Public configuration requires API authentication and a unique secret.
